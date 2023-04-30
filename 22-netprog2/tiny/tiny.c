@@ -39,9 +39,9 @@ int main(int argc, char **argv) {
     printf("Accepted connection from (%s, %s)\n", hostname, port);
 
     // Does the real job
-    doit(connfd);  // line:netp:tiny:doit
+    doit(connfd); // line:netp:tiny:doit
 
-    // 
+    // Close connection
     Close(connfd); // line:netp:tiny:close
   }
 }
@@ -58,28 +58,36 @@ void doit(int fd) {
   char filename[MAXLINE], cgiargs[MAXLINE];
   rio_t rio;
 
-  /* Read request line and headers */
+  /* Read request line */
   Rio_readinitb(&rio, fd);
   if (!Rio_readlineb(&rio, buf, MAXLINE)) // line:netp:doit:readrequest
     return;
   printf("%s", buf);
   sscanf(buf, "%s %s %s", method, uri, version); // line:netp:doit:parserequest
+  
+  // Make sure request method is GET, otherwise report error
   if (strcasecmp(method, "GET")) { // line:netp:doit:beginrequesterr
     clienterror(fd, method, "501", "Not Implemented",
                 "Tiny does not implement this method");
     return;
   }                       // line:netp:doit:endrequesterr
+
+  // Read request headers and ignore them
   read_requesthdrs(&rio); // line:netp:doit:readrequesthdrs
 
   /* Parse URI from GET request */
   is_static = parse_uri(uri, filename, cgiargs); // line:netp:doit:staticcheck
+  
+  // Make sure the file is regular file on the disk
   if (stat(filename, &sbuf) < 0) {               // line:netp:doit:beginnotfound
     clienterror(fd, filename, "404", "Not found",
                 "Tiny couldn't find this file");
     return;
   } // line:netp:doit:endnotfound
 
-  if (is_static) { /* Serve static content */
+  /* Serve static content */
+  if (is_static) { 
+    // Make sure we have read permission
     if (!(S_ISREG(sbuf.st_mode)) ||
         !(S_IRUSR & sbuf.st_mode)) { // line:netp:doit:readable
       clienterror(fd, filename, "403", "Forbidden",
@@ -87,7 +95,10 @@ void doit(int fd) {
       return;
     }
     serve_static(fd, filename, sbuf.st_size); // line:netp:doit:servestatic
-  } else {                                    /* Serve dynamic content */
+  
+  /* Serve dynamic content */
+  } else { 
+    // Make sure the file is executable
     if (!(S_ISREG(sbuf.st_mode)) ||
         !(S_IXUSR & sbuf.st_mode)) { // line:netp:doit:executable
       clienterror(fd, filename, "403", "Forbidden",
@@ -126,19 +137,28 @@ int parse_uri(char *uri, char *filename, char *cgiargs) {
 
   if (!strstr(uri, "cgi-bin")) {
     /* Static content */             // line:netp:parseuri:isstatic
+    // Clear CGI arguments
     strcpy(cgiargs, "");             // line:netp:parseuri:clearcgi
     strcpy(filename, ".");           // line:netp:parseuri:beginconvert1
     strcat(filename, uri);           // line:netp:parseuri:endconvert1
+    // filename now is in the format "./<dir>/<file>.html"
+
+    // Default filename is ./home.html
     if (uri[strlen(uri) - 1] == '/') // line:netp:parseuri:slashcheck
       strcat(filename, "home.html"); // line:netp:parseuri:appenddefault
     return 1;
-  } else { /* Dynamic content */ // line:netp:parseuri:isdynamic
+    
+  } else {                       // line:netp:parseuri:isdynamic
+    /* Dynamic content */
     ptr = index(uri, '?');       // line:netp:parseuri:beginextract
     if (ptr) {
+      // Extract CGI arguments
       strcpy(cgiargs, ptr + 1);
       *ptr = '\0';
     } else
       strcpy(cgiargs, ""); // line:netp:parseuri:endextract
+
+    // Convert the remaining URI to a Linux path filename
     strcpy(filename, "."); // line:netp:parseuri:beginconvert2
     strcat(filename, uri); // line:netp:parseuri:endconvert2
     return 0;
@@ -155,8 +175,13 @@ void serve_static(int fd, char *filename, int filesize) {
   char *srcp, filetype[MAXLINE], buf[MAXBUF];
 
   /* Send response headers to client */
+  // Determine file type by looking at suffix
   get_filetype(filename, filetype);    // line:netp:servestatic:getfiletype
+  
+  // Send response line
   sprintf(buf, "HTTP/1.0 200 OK\r\n"); // line:netp:servestatic:beginserve
+  
+  // Send response headers
   sprintf(buf, "%sServer: Tiny Web Server\r\n", buf);
   sprintf(buf, "%sConnection: close\r\n", buf);
   sprintf(buf, "%sContent-length: %d\r\n", buf, filesize);
@@ -166,11 +191,16 @@ void serve_static(int fd, char *filename, int filesize) {
   printf("%s", buf);
 
   /* Send response body to client */
+  // Open the file, return a file descriptor
   srcfd = Open(filename, O_RDONLY, 0); // line:netp:servestatic:open
+  // Use mmap to map the requested file to a private, read-only virtual memory 
   srcp = Mmap(0, filesize, PROT_READ, MAP_PRIVATE, srcfd,
               0);                 // line:netp:servestatic:mmap
+  // Now fd is not needed since the file data is successfully transferred to a memory area
   Close(srcfd);                   // line:netp:servestatic:close
+  // Write the file data to the client
   Rio_writen(fd, srcp, filesize); // line:netp:servestatic:write
+  // Release the memory allocated
   Munmap(srcp, filesize);         // line:netp:servestatic:munmap
 }
 
@@ -199,33 +229,40 @@ void serve_dynamic(int fd, char *filename, char *cgiargs) {
   char buf[MAXLINE], *emptylist[] = {NULL};
 
   /* Return first part of HTTP response */
+  // Response line
   sprintf(buf, "HTTP/1.0 200 OK\r\n");
   Rio_writen(fd, buf, strlen(buf));
+  // Request header
   sprintf(buf, "Server: Tiny Web Server\r\n");
   Rio_writen(fd, buf, strlen(buf));
 
   if (Fork() == 0) { /* Child */ // line:netp:servedynamic:fork
-    /* Real server would set all CGI vars here */
+    /* Real server would set other CGI vars here as well */
+    // Intiialize QUERY_STRING env variable with CGI arguments from URI
     setenv("QUERY_STRING", cgiargs, 1); // line:netp:servedynamic:setenv
+
+    // Redirect stdout to be the client's fd
     Dup2(fd, STDOUT_FILENO);
-        /* Redirect stdout to client */ // line:netp:servedynamic:dup2
+
+    // Execute the CGI program
     Execve(filename, emptylist, environ);
-        /* Run CGI program */ // line:netp:servedynamic:execve
+    /* Run CGI program */ // line:netp:servedynamic:execve
   }
-  Wait(NULL);
-      /* Parent waits for and reaps child */ // line:netp:servedynamic:wait
+  
+  /* Parent waits for and reaps child */
+  Wait(NULL); // line:netp:servedynamic:wait
 }
 /* $end serve_dynamic */
 
 /*
- * clienterror - returns an error message to the client
+ * clienterror - returns an error message to the client through HTTP response
  */
 /* $begin clienterror */
 void clienterror(int fd, char *cause, char *errnum, char *shortmsg,
                  char *longmsg) {
   char buf[MAXLINE], body[MAXBUF];
 
-  /* Build the HTTP response body */
+  /* Build the HTTP response body in a string */
   sprintf(body, "<html><title>Tiny Error</title>");
   sprintf(body,
           "%s<body bgcolor="
