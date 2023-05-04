@@ -9,5 +9,4 @@ echoserveri: echoserveri.c echo.c csapp.h csapp.c
 hostinfo: hostinfo.c csapp.h csapp.c
 
 clean:
-	rm -f *.o *~ *.exe hostinfo echoclient echoserveri csapp.o
-
+	rm -f *.o *~ *.exe hostinfo echoclient echoserveri csapp.ols
